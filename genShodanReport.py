@@ -79,7 +79,7 @@ if outputDir=="":
 
 # *** Warning, need to watch for OS independence here ***
 myPrint("Creating local directory for results, "+outputDir)
-subprocess.run(["mkdir", "-p", outputDir])
+os.mkdir(outputDir)
 
 # localFile will become the json.gz input
 if(localFile==""):
@@ -156,7 +156,7 @@ for line in fin:
 	else:
 		subnets[sub]=1
 
-pprint(subnets)
+#pprint(subnets)
 # Test output
 #myPrint("openIPs data structure:")
 #pprint(openIPs)
