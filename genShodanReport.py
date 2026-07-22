@@ -10,12 +10,16 @@
 # genShodanReport.py [-q] [-l filename] [-o output directory] -s <search>
 #   -q : Quiet, limited screen output
 #   -l : Followed by a filename, use a previously downloaded file (useful for testing)
+#         The download zipped JSON file (dlData.json.gz) is the one required
 #   -o : Specify the output directory, otherwise one will be made with the date and time. Data will be overwritten
 #   search : A search string. e.g. net:1.1.0.0/16, ignored if we are using a local file
 #            Surround in quotes for a more complicated search, e.g. with excludes "net:1.1.0.0/16 -net:1.1.225.0/24"
 #   Note, shodan commands will not execute if you have not configured your API string
 import os, sys, getopt, time, subprocess
 import gzip, json
+from openpyxl import Workbook
+from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.styles import Font
 from pprint import pprint
 
 # Set some defaults
@@ -25,10 +29,11 @@ searchStr = ""
 quiet=False
 localFile=""
 outputDir=""
+makeExcel=True
 
 # Parse command line arguments
 argList=sys.argv[1:]
-opts="ql:s:o:"
+opts="ql:s:o:X"
 
 try:
 	args, vals = getopt.getopt(argList, opts)
@@ -43,6 +48,8 @@ try:
             #print("Search string=",searchStr)
 		if curArg=="-o":
 			outputDir=curVal
+		if curArg=="-X":
+			makeExcel=False
 
 except getopt.error as err:
 	print(str(err))
@@ -54,6 +61,7 @@ if(searchStr=="" and localFile==""):
 	print("  -q : Quiet, limited screen output")
 	print("  -l : Followed by a filename, use a previously downloaded file (useful for testing)")
 	print("  search : A search string. e.g. net:1.1.0.0/16, ignored if we are using a local file")
+	print("  -X : Do not produce an Excel spreadhsheet")
 	print("Note, shodan commands will not execute if you have not configured your API string")
 	exit(1)
 
@@ -74,21 +82,29 @@ def writeToFile(fh, msg):
 myPrint("Going ahead with quiet={} localfile={} search={}".format(quiet, localFile, searchStr))
 # Generate a local time format for storing data
 
+timeString=time.strftime("%Y_%m_%d_%H%M")
 if outputDir=="":
-	outputDir="shodan_"+time.strftime("%Y_%m_%d_%H%M")
+	outputDir="shodan_"+timeString
 
 # *** Warning, need to watch for OS independence here ***
 myPrint("Creating local directory for results, "+outputDir)
 os.mkdir(outputDir)
+# Filename for excel file
+excelFile=os.path.join(outputDir, "attackSurface_"+timeString+".xlsx")
+#print("Producing excel file ", excelFile)
+
 
 # localFile will become the json.gz input
 if(localFile==""):
 	# Not reading from a local file, download
 	myPrint("Downloading data...")
-	cmd=["shodan", "download", os.path.join(outputDir, dlFile), searchStr]
+	print(outputDir, dlFile)
+	cmd=["shodan", "download", "--limit", "-1", os.path.join(outputDir, dlFile), searchStr]
 	subprocess.run(cmd)
+	print(cmd)
 	localFile=os.path.join(outputDir, dlFile+".json.gz")
 
+#exit(1)
 # Convert to CSV
 cmd=["shodan", "convert", "--fields", "ip,ip_str,hostnames,transport,port,ssl.cipher.versions", localFile, "csv"]
 myPrint("Creating CSV file...")
@@ -147,15 +163,18 @@ for line in fin:
 					else:
 						sslVersions[ver]=1
 
-	# Look at subnets
-	ipArr=ip.split('.')
-	sub=ipArr[2]
-	myPrint("  This IP is in subnet {}".format(ipArr[2]))
-	if sub in  subnets:
-		subnets[sub]+=1
-	else:
-		subnets[sub]=1
-
+	try:
+		# Look at subnets
+		ipArr=ip.split('.')
+		sub=ipArr[2]
+		#myPrint("  This IP is in subnet {}".format(ipArr[2]))
+		if sub in  subnets:
+			subnets[sub]+=1
+		else:
+			subnets[sub]=1
+	except IndexError:
+		# Error processing - this is probably IPv6 and I need to do something more sensible about this
+		print("Warning: unable to split subnet information into subnets for subnet count. Ignoring: ", ipArr)
 #pprint(subnets)
 # Test output
 #myPrint("openIPs data structure:")
@@ -164,6 +183,8 @@ for line in fin:
 #pprint(openPorts)
 #myPrint("SSL version count")
 #pprint(sslVersions)
+
+
 
 # Produce summary report
 writeToFile(ofile, "Number of hosts visible to the internet={}".format(len(openIPs)))
@@ -194,3 +215,98 @@ writeToFile(ofile, "\n\nSubnet distribution:")
 for s, v in sortSubnets:
 	writeToFile(ofile, "{},{}".format(s,v))
 ofile.close()
+
+# If in quite mode, only output a summary
+if(quiet):
+	print("Number of hosts visible to the internet={}".format(len(openIPs)))
+	print("Number of different protocols open={}".format(len(openPorts)))
+
+# Excel output?
+# Produce Excel spreasheet
+if makeExcel:
+	workbook=Workbook()
+	# Create the sheets, 'sheet' already created by default
+	sheet=workbook.active
+	sheet.title="Summary"
+	workbook.create_sheet("Condensed")
+	workbook.create_sheet("Per Proto")
+
+	# Write the summary tab
+	sheet = workbook["Summary"]
+	sheet["A1"] = "Exposed IPs"
+	sheet["A1"].font = Font(bold=True)
+	sheet["B1"] = len(openIPs)
+	sheet["A2"] = "Exposed Protocols"
+	sheet["A2"].font = Font(bold=True)
+	sheet["B2"] = len(openPorts)
+
+	sheet["A4"]= "Protocol"
+	sheet["B4"] = "Count"
+
+	l=5	# Line where data starts
+	tabRef="A4:B"
+	sortPorts=sorted(openPorts.items(), key=lambda x:x[1], reverse=True)
+	for p, v in sortPorts:
+		#print(p,v)
+		sheet.cell(row=l, column=1).value=p
+		sheet.cell(row=l, column=2).value=v
+		l+=1
+	tabRef+=str(l-1)
+	#print(tabRef)
+	table = Table(displayName="ProtoCount", ref=tabRef)
+	style = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
+							showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+	table.tableStyleInfo = style
+	sheet.add_table(table)
+	# Set width and lead summery style
+	sheet.column_dimensions["A"].width = 17
+
+	# Add the condensed sheet (one entry per IP)
+	sheet=workbook["Condensed"]
+	# Create the per proto at the same time
+	prosheet=workbook["Per Proto"]
+
+	# Create table headers
+	sheet.append(["IP", "Hostnames", "Num ports", "Port List"])
+	prosheet.append(["IP", "Hostnames", "Num ports", "Protocol"])
+	# Line number trackers
+	sheetl=1
+	prol=1
+
+	for i in openIPs:
+		hnames=" ".join(openIPs[i]["hostnames"])
+		ports=" ".join(openIPs[i]["portList"])
+		#print(openIPs[i]["portList"])
+
+		# Add to condensed sheet
+		sheet.append([i,hnames, openIPs[i]["portCount"],ports])
+		sheetl+=1
+
+		# Add to per proto sheet
+		for p in openIPs[i]["portList"]:
+			prosheet.append([i, hnames, openIPs[i]["portCount"], p])
+			prol+=1
+
+	# Turn data into tables
+	condRef="A1:D"+str(sheetl)
+	proRef="A1:D"+str(prol)
+	ctable = Table(displayName="CondensedProto", ref=condRef)
+	ptable = Table(displayName="Protocols", ref=proRef)
+	# Create styles
+	cstyle = TableStyleInfo(name="TableStyleMedium10", showFirstColumn=False,
+							showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+	pstyle = TableStyleInfo(name="TableStyleMedium11", showFirstColumn=False,
+							showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+	ctable.tableStyleInfo=cstyle
+	ptable.tableStyleInfo=pstyle
+	sheet.add_table(ctable)
+	prosheet.add_table(ptable)
+
+	# Set the column widths
+	cwid = {"A":18, "B":50, "C":11, "D":35}
+	pwid = {"A":18, "B":50, "C":11, "D":15}
+	for c in cwid:
+		sheet.column_dimensions[c].width = cwid[c]
+	for c in pwid:
+		prosheet.column_dimensions[c].width = pwid[c]
+	workbook.save(filename=excelFile)
